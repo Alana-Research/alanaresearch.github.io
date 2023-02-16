@@ -1,0 +1,274 @@
+<!doctype html><html><head><meta charset=utf-8><meta http-equiv=x-ua-compatible content="IE=edge"><meta name=viewport content="width=device-width,initial-scale=1,shrink-to-fit=no"><title>Alana encryption module, big files encryption, concurrency and performance. - Alana Research</title><meta name=description content="Introduction Many projects on Alana Research will require an state of the art encryption so this is why an internal golang module is being built. Is built on top of golang crypto package and at the time of this writing is focused on file encryption. This article&rsquo;s goal is to test its performance on &ldquo;big&rdquo; files, its concurrency and its multi architecture and multi platform support as well as explaining the software design decisions."><meta name=author content><link type=text/css href=/normal.css rel=stylesheet><script type=text/javascript src=/style@1.5.0></script>
+<script type=text/javascript src=/styles@1.13.0></script>
+<script type=text/javascript src=/master-styles-group></script>
+<script type=text/javascript src=/themes.js></script>
+<script>window.themes=window.themes||new window.Themes</script></head><body class="bg:fade-84@dark font:fade-16@dark font:monospace"><nav class="w:full h:90 bg:fade-84/.95@dark bg:white z:1000"><div class="h:full
+w:full
+max-w:1200
+mx:auto
+px:32
+d:flex
+align-items:center"><div><a href=/ class="mr-3 font:monospace">Alana Research</a></div><div class=ml:auto><a class="font:monospace
+font:fade-30:hover
+font:fade-10.active
+px:2
+transition:150ms;ease-in" href=/projects/ title>Projects</a>
+<a class="font:monospace
+font:fade-30:hover
+font:fade-10.active
+px:2
+transition:150ms;ease-in" href=/articles/ title>Articles</a>
+<a class="font:monospace
+font:fade-30:hover
+font:fade-10.active
+px:2
+transition:150ms;ease-in" href=/about/ title>About</a></div></div></nav><div class="d:flex flex:column@<=sm px:24 jc:center gap:44 word-break:break-word"><div class="max-w:700 w:full box:content-box"><article class=box:border-box><header class=mb:32><div class="font:40 font:monospace">Alana encryption module, big files encryption, concurrency and performance.</div><div class="mt:16 f:fade-50"><time>Dec 21, 2022</time></div></header><div class="_:where(a):hover{text-decoration-color:fade}
+_:where(a){text-decoration:2;underline;fade-10;_text-decoration-color:fade-70@dark}
+_:where(blockquote){bl:5;solid;fade-76/.1;_bl:5;solid;fade-34/.1@dark}
+_:where(code){font:110%;_v:middle}
+_:where(code:not(.highlight_*,pre_*)){p:2;6;_r:4}
+_:where(del){text-decoration:1;line-through;fade-68;_text-decoration-color:red-64@dark}
+_:where(figcaption){text:14;_p:10;20;0;_width:fit;_mx:auto;_font:fade-56;_font:fade-57@dark}
+_:where(h1){font:40;_font:extrabold}
+_:where(h1,h2,h3)+:where(h1,h2,h3){mt:.5em}
+_:where(h1,h2,h3,h4,h5,h6){mt:2em}
+_:where(h2){mb:1em;_font:32}
+_:where(h3){font:24}
+_:where(h4){font:20}
+_:where(h5){font:16}
+_:where(h6){font:14}
+_:where(li)::marker{font:fade-44;_font:fade-68@dark}
+_:where(li){pl:.375em}
+_:where(mark){text-decoration:1;underline;#fce016;_bg:transparent;_text-decoration-color:rgb(252;224;22/.5)@dark}
+_:where(p,li){font:fade-76;_font:16;_line-height:1.65;_font:fade-34@dark}
+_:where(p,pre,blockquote,figure,ul,ol,table){my:1.125em}
+>:first-child{mt:0!}
+_:where(pre){p:20;_r:8;_overflow:auto}
+_:where(pre,code:not(.highlight_*)){bg:fade-2;_bg:fade-92!@dark}
+_:where(strong,b,a,code:not(.highlight_*),mark,del){font:fade-82;_font:fade-20@dark}
+_:where(table){width:full;_border-spacing:0}
+_:where(td){v:baseline}
+_:where(td,th):first-child{pl:0}
+_:where(td,th):last-child{pr:0}
+_:where(td,th){bb:1;solid;fade-92/.06;_p:6;_b:fade-4/.04@dark}
+_:where(th){font:fade-78;_font:14;_text:left;_font:fade-12@dark}
+_:where(th,p_code,li_code,a,mark){font:semibold;_font:medium@dark}
+_:where(ul){list-style-type:disc}
+_:where(ul,ol,blockquote){pl:1.5em}
+_:where(video,img){max-width:full}
+_:where(a,mark){text-underline-offset:3}"><h2 id=introduction>Introduction</h2><p>Many projects on Alana Research will require an state of the art encryption so this is why an internal golang module is being built. Is built on top of golang <a href=https://pkg.go.dev/crypto>crypto</a> package and at the time of this writing is focused on file encryption. This article&rsquo;s goal is to test its performance on &ldquo;big&rdquo; files, its concurrency and its multi architecture and multi platform support as well as explaining the software design decisions.</p><h2 id=symmetric-encryption-and-decryption-of-files>Symmetric encryption and decryption of files</h2><p>For the symmetric encryption we can use two types of algorithm modes: Block or Stream. Without entering in details, block ciphers encrypts chunks of data and stream encrypts bit by bit. As I wanted to use AES-256 as a state of the art encryption algorithm, it&rsquo;s block cipher based but I didn&rsquo;t want to use a block cipher like <a href=https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Cipher_block_chaining_(CBC)>CBC</a> as I want to avoid loading large files into memory. But what can be actually done is to have block ciphers acting as stream chipers. Given that I keep reading chunks of data into a decided memory buffer size, so we can be more memory efficient and then read the next block chunks of data as it was a stream of data, and finally connecting them using a counter. This is what <a href=https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Counter_(CTR)>CTR</a> mode will do for us.</p><p>Both block ciphers with a stream-oriented encryption mode, and stream ciphers, may run into security issues if the same encryption key is used so we need an initialization vector (IV) into the block cipher. If the IV is random then is safe enough to generate a unique counter block for encryption using a method like XOR with the counter. In the following diagram there is a visual representation of it from <a href=https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Counter_(CTR)%3E>Wikipedia</a>:</p><p><img src=/alanacrypt/diagram.png alt="CTR diagram"></p><p>So the private key for AES-256 symmetric encryption has to be 32 bytes long:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#a6e22e>key</span> <span style=color:#f92672>:=</span> make([]<span style=color:#66d9ef>byte</span>, <span style=color:#ae81ff>32</span>)
+</span></span><span style=display:flex><span><span style=color:#a6e22e>_</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>rand</span>.<span style=color:#a6e22e>Read</span>(<span style=color:#a6e22e>key</span>)
+</span></span></code></pre></div><p>Then we can open the file to be encrypted and the future encrypted file appended with the desired file extension. The process is done using the golang libraries <code>crypto/aes</code> and <code>crypto/cipher</code>:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>cipherBlock</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>aes</span>.<span style=color:#a6e22e>NewCipher</span>(<span style=color:#a6e22e>key</span>)
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>return</span> <span style=color:#a6e22e>errors</span>.<span style=color:#a6e22e>New</span>(<span style=color:#a6e22e>fmt</span>.<span style=color:#a6e22e>Sprintf</span>(<span style=color:#e6db74>&#34;Encrypting FAILED at cipher creation. ERROR: %s&#34;</span>, <span style=color:#a6e22e>err</span>.<span style=color:#a6e22e>Error</span>()))
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>iv</span> <span style=color:#f92672>:=</span> make([]<span style=color:#66d9ef>byte</span>, <span style=color:#a6e22e>cipherBlock</span>.<span style=color:#a6e22e>BlockSize</span>())
+</span></span><span style=display:flex><span><span style=color:#a6e22e>_</span>, <span style=color:#a6e22e>err</span> = <span style=color:#a6e22e>rand</span>.<span style=color:#a6e22e>Read</span>(<span style=color:#a6e22e>iv</span>)
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>return</span> <span style=color:#a6e22e>errors</span>.<span style=color:#a6e22e>New</span>(<span style=color:#a6e22e>fmt</span>.<span style=color:#a6e22e>Sprintf</span>(<span style=color:#e6db74>&#34;Encrypting FAILED at IV creation. ERROR: %s&#34;</span>, <span style=color:#a6e22e>err</span>.<span style=color:#a6e22e>Error</span>()))
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>infile</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>os</span>.<span style=color:#a6e22e>Open</span>(<span style=color:#a6e22e>filePath</span>)
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>return</span> <span style=color:#a6e22e>errors</span>.<span style=color:#a6e22e>New</span>(<span style=color:#a6e22e>fmt</span>.<span style=color:#a6e22e>Sprintf</span>(<span style=color:#e6db74>&#34;Encrypting FAILED at opening file -&gt; %s ERROR: %s&#34;</span>, <span style=color:#a6e22e>filePath</span>, <span style=color:#a6e22e>err</span>.<span style=color:#a6e22e>Error</span>()))
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span><span style=color:#a6e22e>outfile</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>os</span>.<span style=color:#a6e22e>OpenFile</span>(<span style=color:#a6e22e>filePath</span><span style=color:#f92672>+</span><span style=color:#e6db74>&#34;.&#34;</span><span style=color:#f92672>+</span><span style=color:#a6e22e>fileExtension</span>, <span style=color:#a6e22e>os</span>.<span style=color:#a6e22e>O_RDWR</span>|<span style=color:#a6e22e>os</span>.<span style=color:#a6e22e>O_CREATE</span>, <span style=color:#ae81ff>0777</span>)
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>return</span> <span style=color:#a6e22e>errors</span>.<span style=color:#a6e22e>New</span>(<span style=color:#a6e22e>fmt</span>.<span style=color:#a6e22e>Sprintf</span>(<span style=color:#e6db74>&#34;Encrypting FAILED at opening file -&gt; %s ERROR: %s&#34;</span>, <span style=color:#a6e22e>filePath</span><span style=color:#f92672>+</span><span style=color:#e6db74>&#34;.&#34;</span><span style=color:#f92672>+</span><span style=color:#a6e22e>fileExtension</span>, <span style=color:#a6e22e>err</span>.<span style=color:#a6e22e>Error</span>()))
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span><span style=color:#66d9ef>defer</span> <span style=color:#a6e22e>infile</span>.<span style=color:#a6e22e>Close</span>()
+</span></span><span style=display:flex><span><span style=color:#66d9ef>defer</span> <span style=color:#a6e22e>outfile</span>.<span style=color:#a6e22e>Close</span>()
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>buffer</span> <span style=color:#f92672>:=</span> make([]<span style=color:#66d9ef>byte</span>, <span style=color:#a6e22e>BUFFER_SIZE</span>)
+</span></span><span style=display:flex><span><span style=color:#a6e22e>stream</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>cipher</span>.<span style=color:#a6e22e>NewCTR</span>(<span style=color:#a6e22e>cipherBlock</span>, <span style=color:#a6e22e>iv</span>)
+</span></span><span style=display:flex><span><span style=color:#66d9ef>var</span> <span style=color:#a6e22e>errorEncrypting</span> <span style=color:#66d9ef>error</span> = <span style=color:#66d9ef>nil</span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>for</span> {
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>bytePosition</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>infile</span>.<span style=color:#a6e22e>Read</span>(<span style=color:#a6e22e>buffer</span>)
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>==</span> <span style=color:#a6e22e>io</span>.<span style=color:#a6e22e>EOF</span> {
+</span></span><span style=display:flex><span>		<span style=color:#66d9ef>break</span>
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>errorEncrypting</span> = <span style=color:#a6e22e>err</span>
+</span></span><span style=display:flex><span>		<span style=color:#66d9ef>break</span>
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>stream</span>.<span style=color:#a6e22e>XORKeyStream</span>(<span style=color:#a6e22e>buffer</span>, <span style=color:#a6e22e>buffer</span>[:<span style=color:#a6e22e>bytePosition</span>])
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>_</span>, <span style=color:#a6e22e>err</span> = <span style=color:#a6e22e>outfile</span>.<span style=color:#a6e22e>Write</span>(<span style=color:#a6e22e>buffer</span>[:<span style=color:#a6e22e>bytePosition</span>])
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>errorEncrypting</span> = <span style=color:#a6e22e>err</span>
+</span></span><span style=display:flex><span>		<span style=color:#66d9ef>break</span>
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>errorEncrypting</span> <span style=color:#f92672>==</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>_</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>outfile</span>.<span style=color:#a6e22e>Write</span>(<span style=color:#a6e22e>iv</span>)
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#66d9ef>return</span> <span style=color:#a6e22e>errors</span>.<span style=color:#a6e22e>New</span>(<span style=color:#e6db74>&#34;Error appending IV -&gt; &#34;</span> <span style=color:#f92672>+</span> <span style=color:#a6e22e>err</span>.<span style=color:#a6e22e>Error</span>())
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span></code></pre></div><p>As you can see in the code the file is read by chunks instead of all it in memory and encrypting its bytes using the XOR method on CTR with an AES key of 256 bits and a different 32 bytes IV per file. Also each file is encrypted on a different goroutine, and notice how each original file is removed once encrypted. Here is the code for that:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>files</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>getFiles</span>(<span style=color:#a6e22e>rootPath</span>)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>var</span> <span style=color:#a6e22e>totalFilesEncrypted</span> <span style=color:#66d9ef>int</span> = <span style=color:#ae81ff>0</span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>var</span> <span style=color:#a6e22e>wg</span> <span style=color:#a6e22e>sync</span>.<span style=color:#a6e22e>WaitGroup</span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>wg</span>.<span style=color:#a6e22e>Add</span>(len(<span style=color:#a6e22e>files</span>))
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>for</span> <span style=color:#a6e22e>_</span>, <span style=color:#a6e22e>file</span> <span style=color:#f92672>:=</span> <span style=color:#66d9ef>range</span> <span style=color:#a6e22e>files</span> {
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>go</span> <span style=color:#66d9ef>func</span>(<span style=color:#a6e22e>file</span> <span style=color:#66d9ef>string</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>FileEncryption</span>(<span style=color:#a6e22e>file</span>, <span style=color:#a6e22e>key</span>)
+</span></span><span style=display:flex><span>		<span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>			<span style=color:#75715e>//return error
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>		} <span style=color:#66d9ef>else</span> {
+</span></span><span style=display:flex><span>			<span style=color:#75715e>//success
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>			<span style=color:#a6e22e>err</span> = <span style=color:#a6e22e>os</span>.<span style=color:#a6e22e>Remove</span>(<span style=color:#a6e22e>file</span>)
+</span></span><span style=display:flex><span>			<span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>				<span style=color:#75715e>//return error
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>			} <span style=color:#66d9ef>else</span> {
+</span></span><span style=display:flex><span>				<span style=color:#a6e22e>atomic</span>.<span style=color:#a6e22e>AddInt64</span>(<span style=color:#f92672>&amp;</span><span style=color:#a6e22e>totalFilesEncrypted</span>, <span style=color:#ae81ff>1</span>)
+</span></span><span style=display:flex><span>			}
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>wg</span>.<span style=color:#a6e22e>Done</span>()
+</span></span><span style=display:flex><span>	}(<span style=color:#a6e22e>file</span>)
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span><span style=color:#a6e22e>wg</span>.<span style=color:#a6e22e>Wait</span>()
+</span></span><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span></code></pre></div><p>In order to do decrypt the file, we have to first extract the bytes of the IV and with the encryption key we generate the same cipher block to apply the same procedure to the encrpyted data, as it&rsquo;s a symmetric encryption:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>iv</span> <span style=color:#f92672>:=</span> make([]<span style=color:#66d9ef>byte</span>, <span style=color:#a6e22e>cipherBlock</span>.<span style=color:#a6e22e>BlockSize</span>())
+</span></span><span style=display:flex><span><span style=color:#a6e22e>ivLength</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>endFile</span>.<span style=color:#a6e22e>Size</span>() <span style=color:#f92672>-</span> int64(len(<span style=color:#a6e22e>iv</span>))
+</span></span><span style=display:flex><span><span style=color:#a6e22e>_</span>, <span style=color:#a6e22e>err</span> = <span style=color:#a6e22e>encfile</span>.<span style=color:#a6e22e>ReadAt</span>(<span style=color:#a6e22e>iv</span>, <span style=color:#a6e22e>ivLength</span>)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>buffer</span> <span style=color:#f92672>:=</span> make([]<span style=color:#66d9ef>byte</span>, <span style=color:#a6e22e>BUFFER_SIZE</span>)
+</span></span><span style=display:flex><span><span style=color:#a6e22e>stream</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>cipher</span>.<span style=color:#a6e22e>NewCTR</span>(<span style=color:#a6e22e>cipherBlock</span>, <span style=color:#a6e22e>iv</span>)
+</span></span><span style=display:flex><span><span style=color:#66d9ef>var</span> <span style=color:#a6e22e>errorDecrypting</span> <span style=color:#66d9ef>error</span> = <span style=color:#66d9ef>nil</span>
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>for</span> {
+</span></span><span style=display:flex><span>	<span style=color:#f92672>...</span>
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>ivLength</span> <span style=color:#f92672>-=</span> int64(<span style=color:#a6e22e>bytePosition</span>)
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>stream</span>.<span style=color:#a6e22e>XORKeyStream</span>(<span style=color:#a6e22e>buffer</span>, <span style=color:#a6e22e>buffer</span>[:<span style=color:#a6e22e>bytePosition</span>])
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>outfile</span>.<span style=color:#a6e22e>Write</span>(<span style=color:#a6e22e>buffer</span>[:<span style=color:#a6e22e>bytePosition</span>])
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>errorDecrypting</span> = <span style=color:#a6e22e>err</span>
+</span></span><span style=display:flex><span>		<span style=color:#66d9ef>break</span>
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span></code></pre></div><hr><h2 id=file-search>File search</h2><p>In order to get a list of files to encrypt efficiently I used filepath.WalkDir() as it&rsquo;s more efficient than <code>filepath.Walk()</code> because avoids calling <code>os.Lstat</code> on every visited file or directory. The files are walked in lexical order, which makes the output deterministic but requires WalkDir to read an entire directory into memory before proceeding:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#66d9ef>func</span> <span style=color:#a6e22e>getFiles</span>(<span style=color:#a6e22e>rootPath</span> <span style=color:#66d9ef>string</span>) []<span style=color:#66d9ef>string</span> {
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>var</span> <span style=color:#a6e22e>paths</span> []<span style=color:#66d9ef>string</span>
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>filepath</span>.<span style=color:#a6e22e>WalkDir</span>(<span style=color:#a6e22e>rootPath</span>, <span style=color:#66d9ef>func</span>(<span style=color:#a6e22e>path</span> <span style=color:#66d9ef>string</span>, <span style=color:#a6e22e>di</span> <span style=color:#a6e22e>fs</span>.<span style=color:#a6e22e>DirEntry</span>, <span style=color:#a6e22e>err</span> <span style=color:#66d9ef>error</span>) <span style=color:#66d9ef>error</span> {
+</span></span><span style=display:flex><span>		<span style=color:#66d9ef>if</span> !<span style=color:#a6e22e>di</span>.<span style=color:#a6e22e>IsDir</span>() {
+</span></span><span style=display:flex><span>			<span style=color:#a6e22e>paths</span> = append(<span style=color:#a6e22e>paths</span>, <span style=color:#a6e22e>path</span>)
+</span></span><span style=display:flex><span>		}
+</span></span><span style=display:flex><span>		<span style=color:#66d9ef>return</span> <span style=color:#66d9ef>nil</span>
+</span></span><span style=display:flex><span>	})
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>return</span> <span style=color:#a6e22e>paths</span>
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>And of course any path manipulation should be done with <code>filepath.Join()</code> to make it multiplatform.</p><hr><h2 id=asymmetric-encryption-and-decryption-of-the-key>Asymmetric encryption and decryption of the key</h2><p>Once we have all files encrypted with the randomly generate 32 bytes key, the idea will be to store it encrypted so it can be shared or stored safely. So using an asymmetric encryption like RSA, we can with that library encrypt that key with a public RSA key. Asymmetric enryption is not efficient for encrypting large files, but perfect for encrypting this type of data.</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>block</span>, <span style=color:#a6e22e>_</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>pem</span>.<span style=color:#a6e22e>Decode</span>([]byte(<span style=color:#a6e22e>pubKey</span>))
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>block</span> <span style=color:#f92672>==</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#75715e>//return error
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>}
+</span></span><span style=display:flex><span><span style=color:#a6e22e>parsedPub</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>x509</span>.<span style=color:#a6e22e>ParsePKCS1PublicKey</span>(<span style=color:#a6e22e>block</span>.<span style=color:#a6e22e>Bytes</span>)
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#75715e>//return error
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>}
+</span></span><span style=display:flex><span><span style=color:#a6e22e>pubEncKey</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>rsa</span>.<span style=color:#a6e22e>EncryptOAEP</span>(<span style=color:#a6e22e>sha256</span>.<span style=color:#a6e22e>New</span>(), <span style=color:#a6e22e>rand</span>.<span style=color:#a6e22e>Reader</span>, <span style=color:#a6e22e>parsedPub</span>, <span style=color:#a6e22e>keyToEncrypt</span>, []byte(<span style=color:#e6db74>&#34;encrypted&#34;</span>))
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>return</span> <span style=color:#66d9ef>nil</span>, <span style=color:#a6e22e>err</span>
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span></code></pre></div><p>The library has an option to save that encrypted key in a text file where is written in hexadecimal. I tend to use hex when converting bytes to strings that has to ve written on a file because this way I avoid utf-8 or Unicode weird conversions and resulting in a string full of unkwon characters.
+With hex the resulting string will be 64 bytes as every byte/ascii value is represented with two characters(decimals or letter) but the advantage is the reliability it gives me in order to convert bytes to string. The encoding and decoding to bytes is immediate with the package <code>"encoding/hex"</code> and function <code>hex.DecodeString()</code>. Here is the code where we first read the private key:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span><span style=display:flex><span><span style=color:#75715e>//retrieve key in bytes reading the .pem key file
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#a6e22e>privateKeyString</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>ioutil</span>.<span style=color:#a6e22e>ReadFile</span>(<span style=color:#a6e22e>rsa_private_key_path</span>)
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#75715e>//return error
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>}
+</span></span><span style=display:flex><span><span style=color:#a6e22e>block</span>, <span style=color:#a6e22e>_</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>pem</span>.<span style=color:#a6e22e>Decode</span>([]byte(<span style=color:#a6e22e>privateKeyString</span>))
+</span></span><span style=display:flex><span><span style=color:#a6e22e>privateKey</span>, <span style=color:#a6e22e>_</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>x509</span>.<span style=color:#a6e22e>ParsePKCS1PrivateKey</span>(<span style=color:#a6e22e>block</span>.<span style=color:#a6e22e>Bytes</span>)
+</span></span><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span></code></pre></div><p>And then we can scan the file to go line by line searching for where we have the public key in hex (<code>for scanner.Scan()</code>) and then decode it with the private key, so we will obtain the symmetric key:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span><span style=display:flex><span><span style=color:#a6e22e>encryptedKey</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>ConvertHexToByteArray</span>(<span style=color:#a6e22e>strings</span>.<span style=color:#a6e22e>Split</span>(<span style=color:#a6e22e>line</span>, <span style=color:#e6db74>&#34;: &#34;</span>)[<span style=color:#ae81ff>1</span>])
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#75715e>//return error
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>}
+</span></span><span style=display:flex><span><span style=color:#75715e>//decrypt that with the private key retrieved at the beginning
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span><span style=color:#a6e22e>decryptedmsg</span>, <span style=color:#a6e22e>err</span> <span style=color:#f92672>:=</span> <span style=color:#a6e22e>rsa</span>.<span style=color:#a6e22e>DecryptOAEP</span>(<span style=color:#a6e22e>sha256</span>.<span style=color:#a6e22e>New</span>(), <span style=color:#a6e22e>rand</span>.<span style=color:#a6e22e>Reader</span>, <span style=color:#a6e22e>privateKey</span>, <span style=color:#a6e22e>encryptedKey</span>, []byte(<span style=color:#e6db74>&#34;encrypted.&#34;</span>))
+</span></span><span style=display:flex><span><span style=color:#66d9ef>if</span> <span style=color:#a6e22e>err</span> <span style=color:#f92672>!=</span> <span style=color:#66d9ef>nil</span> {
+</span></span><span style=display:flex><span>	<span style=color:#75715e>//return error
+</span></span></span><span style=display:flex><span><span style=color:#75715e></span>}
+</span></span><span style=display:flex><span><span style=color:#f92672>...</span>
+</span></span></code></pre></div><hr><h2 id=golang-functional-options-pattern>Golang functional options pattern</h2><p>This module uses the functional options pattern, which is an elegant way to provide optional constructor parameters in Golang.</p><p>It works recieving n options function-type on the constructor (<code>opts ...EncOptions</code>) like this:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#66d9ef>type</span> <span style=color:#a6e22e>EncOptions</span> <span style=color:#66d9ef>func</span>(<span style=color:#f92672>*</span><span style=color:#a6e22e>FolderEncryption</span>)
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span> <span style=color:#a6e22e>NewFolderEncryption</span>(<span style=color:#a6e22e>pathToEncrypt</span> <span style=color:#66d9ef>string</span>, <span style=color:#a6e22e>fileExtension</span> <span style=color:#66d9ef>string</span>, <span style=color:#a6e22e>opts</span> <span style=color:#f92672>...</span><span style=color:#a6e22e>EncOptions</span>) (<span style=color:#f92672>*</span><span style=color:#a6e22e>FolderEncryption</span>, <span style=color:#66d9ef>error</span>) {
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>enc</span> <span style=color:#f92672>:=</span> <span style=color:#f92672>&amp;</span><span style=color:#a6e22e>FolderEncryption</span>{
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>Folder</span>:        <span style=color:#a6e22e>pathToEncrypt</span>,
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>BufferSize</span>:    <span style=color:#a6e22e>DEFAULT_BUFFER_SIZE</span>,
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>FileExtension</span>: <span style=color:#a6e22e>fileExtension</span>,
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>SymmetricKey</span>:  <span style=color:#66d9ef>nil</span>,
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>Logger</span>:        <span style=color:#66d9ef>nil</span>,
+</span></span><span style=display:flex><span>	}
+</span></span></code></pre></div><p>So then I just create functions of EncOptions type for any FolderEncryption attribute that can be optionally modified. For example for BufferSize:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#66d9ef>func</span> <span style=color:#a6e22e>WithBufferSize</span>(<span style=color:#a6e22e>size</span> <span style=color:#66d9ef>int</span>) <span style=color:#a6e22e>EncOptions</span> {
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>return</span> <span style=color:#66d9ef>func</span>(<span style=color:#a6e22e>encOpt</span> <span style=color:#f92672>*</span><span style=color:#a6e22e>FolderEncryption</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>encOpt</span>.<span style=color:#a6e22e>BufferSize</span> = <span style=color:#a6e22e>size</span>
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>And the constructor just have to go through all of this EncOptions recieved:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#66d9ef>for</span> <span style=color:#a6e22e>_</span>, <span style=color:#a6e22e>optFunction</span> <span style=color:#f92672>:=</span> <span style=color:#66d9ef>range</span> <span style=color:#a6e22e>opts</span> {
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>optFunction</span>(<span style=color:#a6e22e>enc</span>)		
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><h2 id=adapting-a-go-module-to-a-client-custom-logger>Adapting a Go module to a client custom logger</h2><p>With the same functional options patterns explained before, we can receive a desired logging fucntions to act like a callback to log messages.</p><p>To do this we will need a Logger interface with a Log function to print the log message. So the client logger will have to meet this interface as it&rsquo;s with what we&rsquo;ll initialize the constructor:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#66d9ef>type</span> <span style=color:#a6e22e>Logger</span> <span style=color:#66d9ef>interface</span> {
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>Log</span>(<span style=color:#f92672>...</span><span style=color:#66d9ef>interface</span>{})
+</span></span><span style=display:flex><span>}
+</span></span><span style=display:flex><span><span style=color:#66d9ef>func</span> (<span style=color:#a6e22e>f</span> <span style=color:#a6e22e>LoggerFunc</span>) <span style=color:#a6e22e>Log</span>(<span style=color:#a6e22e>args</span> <span style=color:#f92672>...</span><span style=color:#66d9ef>interface</span>{}) {
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>f</span>(<span style=color:#a6e22e>args</span><span style=color:#f92672>...</span>)
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#66d9ef>func</span> <span style=color:#a6e22e>WithLogger</span>(<span style=color:#a6e22e>logger</span> <span style=color:#a6e22e>Logger</span>) <span style=color:#a6e22e>EncOptions</span> {
+</span></span><span style=display:flex><span>	<span style=color:#66d9ef>return</span> <span style=color:#66d9ef>func</span>(<span style=color:#a6e22e>encOpt</span> <span style=color:#f92672>*</span><span style=color:#a6e22e>FolderEncryption</span>) {
+</span></span><span style=display:flex><span>		<span style=color:#a6e22e>encOpt</span>.<span style=color:#a6e22e>Logger</span> = <span style=color:#a6e22e>logger</span>
+</span></span><span style=display:flex><span>	}
+</span></span><span style=display:flex><span>}
+</span></span></code></pre></div><p>So in order to make it easy for the client app to meet this interface there is this type that acts as an adapter:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#66d9ef>type</span> <span style=color:#a6e22e>LoggerFunc</span> <span style=color:#66d9ef>func</span>(<span style=color:#f92672>...</span><span style=color:#66d9ef>interface</span>{})
+</span></span></code></pre></div><p>So the client app will just have to use this function type with their logging function:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-go data-lang=go><span style=display:flex><span><span style=color:#a6e22e>alanacrypt</span>.<span style=color:#a6e22e>WithLogger</span>(<span style=color:#a6e22e>alanacrypt</span>.<span style=color:#a6e22e>LoggerFunc</span>(<span style=color:#66d9ef>func</span>(<span style=color:#a6e22e>args</span> <span style=color:#f92672>...</span><span style=color:#66d9ef>interface</span>{}) {
+</span></span><span style=display:flex><span>	<span style=color:#a6e22e>tlog</span>.<span style=color:#a6e22e>Warn</span>(<span style=color:#a6e22e>args</span><span style=color:#f92672>...</span>)
+</span></span><span style=display:flex><span>})
+</span></span></code></pre></div><h2 id=benchmarks-results-and-conclusions>Benchmarks, results and conclusions</h2><p>In order to test its performance I wanted to see how good is it with a folder with multiple folders and files and then how it does with a big files. I created the environment with this code:</p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-sh data-lang=sh><span style=display:flex><span><span style=color:#75715e>#to create multiple files where $text being a lorem ipsum of some kb:</span>
+</span></span><span style=display:flex><span>mkdir -p DUT/videos/<span style=color:#f92672>{</span>1..30<span style=color:#f92672>}</span>/HD_videos
+</span></span><span style=display:flex><span><span style=color:#66d9ef>for</span> i in <span style=color:#f92672>{</span>1..30<span style=color:#f92672>}</span>; <span style=color:#66d9ef>do</span>
+</span></span><span style=display:flex><span>  <span style=color:#66d9ef>for</span> j in <span style=color:#f92672>{</span>1..100<span style=color:#f92672>}</span>; <span style=color:#66d9ef>do</span>
+</span></span><span style=display:flex><span>    echo <span style=color:#e6db74>&#34;Writing &#34;</span> DUT/videos/<span style=color:#e6db74>${</span>i<span style=color:#e6db74>}</span>/HD_videos/video<span style=color:#e6db74>${</span>j<span style=color:#e6db74>}</span>.txt;
+</span></span><span style=display:flex><span>    echo $text &gt; DUT/videos/<span style=color:#e6db74>${</span>i<span style=color:#e6db74>}</span>/HD_videos/video<span style=color:#e6db74>${</span>j<span style=color:#e6db74>}</span>.txt; 
+</span></span><span style=display:flex><span>  ...
+</span></span><span style=display:flex><span>
+</span></span><span style=display:flex><span><span style=color:#75715e>#and to create some big files I used head filling with urandom, for example a 3GB file:</span>
+</span></span><span style=display:flex><span>head -c <span style=color:#ae81ff>3000000000</span> &lt;/dev/urandom &gt; DUT/videos/1/HD_videos/video1.mp4
+</span></span><span style=display:flex><span>...
+</span></span></code></pre></div><p>An important thing I noticed is that (on unix based environments at least) each file created is also stored in memory as buff/cache, so in order to make the tests more deterministic, the memory has to be cleaned up:</p><p><img src=/alanacrypt/cache.png alt=cache></p><div class=highlight><pre tabindex=0 style=color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-sh data-lang=sh><span style=display:flex><span><span style=color:#75715e>#on mac</span>
+</span></span><span style=display:flex><span>purge
+</span></span><span style=display:flex><span><span style=color:#75715e>#on linux</span>
+</span></span><span style=display:flex><span>sync; echo <span style=color:#ae81ff>1</span> &gt; /proc/sys/vm/drop_caches
+</span></span><span style=display:flex><span>sync; echo <span style=color:#ae81ff>2</span> &gt; /proc/sys/vm/drop_caches
+</span></span><span style=display:flex><span>sync; echo <span style=color:#ae81ff>3</span> &gt; /proc/sys/vm/drop_caches
+</span></span></code></pre></div><p>Once the setup was done I ran different tests modifying the buffer variable where we read bytes. It should be allocated on the heap memory and the sweet balanced point of performance/efficiency will depend on the system, but I wanted to see how significant are the differences if any:</p><p>(all metrics are in seconds)</p><ul><li>Test of 60 directories, 3000 files => 1.4MB each file, 4.1GB folder total</li></ul><p><img src=/alanacrypt/3000.png alt=3000></p><p><img src=/alanacrypt/3000size.png alt=3000size></p><p><img src=/alanacrypt/3000output.png alt=3000out></p><p><img src=/alanacrypt/multiple_files.png alt=multfiles></p><ul><li>Test of 3GB single file</li></ul><p><img src=/alanacrypt/3gb.png alt=3gb></p><ul><li>Test of 6 files of 3GB</li></ul><p><img src=/alanacrypt/6x3gb.png alt=6x3gb></p><ul><li>Test of 3GB file vs openssl cli</li></ul><p><img src=/alanacrypt/openssl.png alt=openssl></p><p>The first conclusion of this metrics are how bad performance the best raspberry
+pi (4B 8GB RAM) can be for cpu intensives tasks. Its processor is a 1.5GHz Quad
+core Cortex-A72 (ARM v8) but probably the IOPS of an sd card storage also
+affects to the performance as well as it&rsquo;s a low power system. But besides
+this, for example if we focus on the best system, the M1 from a macbook pro, we
+do not see any significant improvement on most of buffer modifications, but on
+the other hand we do see that the parallelism on multiple files can saves us
+some time as I expected.
+So nothing that I didn&rsquo;t expect, maybe only how fast is it compared to a
+similar openssl encryption on a mac m1 version, probably as its compiled in the
+same architecture and openssl might not be so much optimized for arm at this
+time.</p><p>Besides that, take in mind the <code>ulimit</code> hard limit on linux systems to
+avoid throttling on the number of files opened when doing multiples goroutines.
+And also take in mind that the file is removed once finished encryting
+successfully, so until that you&rsquo;ll use 2x the disk space of every file
+encrypted until the original is removed.</p><p>So this is the <a href=https://github.com/Alana-Research/alanacrypt>alana-crypt</a>
+library/module. It&rsquo;s in progress and will be updated/improved when more
+projects requires more encryption related functionality. It does have a great
+performance and simplicity and it&rsquo;ll be the centralized wrapper of all
+encryption related code that alana reasearch will use.</p></div></article></div></div></body></html>
